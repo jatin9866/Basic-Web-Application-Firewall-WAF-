@@ -1,0 +1,93 @@
+import re
+import time
+from flask import Flask, request, jsonify
+
+app = Flask(__name__)
+
+# Blocked IPs list
+blocked_ips = ["192.168.1.100", "10.0.0.1"]
+
+# Rate limiting
+rate_limit = {}
+MAX_REQUESTS = 10
+TIME_FRAME = 60  # 60 seconds
+
+# Log file
+LOG_FILE = "logs/request.log"
+
+
+def log_request(ip, endpoint):
+    with open(LOG_FILE, "a") as log_file:
+        log_file.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - IP: {ip}, Endpoint: {endpoint}\n")
+
+
+# 1. Basic IP Blocking
+@app.before_request
+def block_ip():
+    ip = request.remote_addr
+    if ip in blocked_ips:
+        log_request(ip, request.path)
+        return jsonify({"error": "Your IP is blocked."}), 403
+
+
+# 2. SQL Injection Detection
+def detect_sql_injection(payload):
+    sql_patterns = [r"(\%27)|(\')|(\-\-)|(\%23)|(#)", r"\b(select|union|insert|update|delete|drop|--|#)\b"]
+    for pattern in sql_patterns:
+        if re.search(pattern, payload, re.IGNORECASE):
+            return True
+    return False
+
+
+@app.route('/data', methods=['POST'])
+def handle_data():
+    data = request.form.get("data", "")
+    if detect_sql_injection(data):
+        log_request(request.remote_addr, request.path)
+        return jsonify({"error": "SQL Injection attempt detected!"}), 400
+    return jsonify({"success": "Data received successfully!"})
+
+
+# 3. XSS Detection
+def detect_xss(payload):
+    xss_pattern = r"<script.*?>.*?</script.*?>"
+    if re.search(xss_pattern, payload, re.IGNORECASE):
+        return True
+    return False
+
+
+@app.route('/submit', methods=['POST'])
+def submit_form():
+    user_input = request.form.get("input", "")
+    if detect_xss(user_input):
+        log_request(request.remote_addr, request.path)
+        return jsonify({"error": "XSS attempt detected!"}), 400
+    return jsonify({"success": "Input submitted successfully!"})
+
+
+# 4. Rate Limiting
+@app.before_request
+def rate_limiting():
+    ip = request.remote_addr
+    current_time = time.time()
+    if ip in rate_limit:
+        request_times = rate_limit[ip]
+        request_times = [t for t in request_times if current_time - t < TIME_FRAME]
+        rate_limit[ip] = request_times
+        if len(request_times) >= MAX_REQUESTS:
+            log_request(ip, request.path)
+            return jsonify({"error": "Rate limit exceeded. Try again later."}), 429
+        rate_limit[ip].append(current_time)
+    else:
+        rate_limit[ip] = [current_time]
+
+
+# 5. Request Logging
+@app.after_request
+def log_response(response):
+    log_request(request.remote_addr, request.path)
+    return response
+
+
+if __name__ == '__main__':
+    app.run(debug=True)
